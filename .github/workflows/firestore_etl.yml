@@ -36,4 +36,4 @@ jobs:
         
       # 3. Run the Python ETL script
       - name: Execute ETL Script
-        run: python firestore_etl.py
+        run: python firestore_elt.py
