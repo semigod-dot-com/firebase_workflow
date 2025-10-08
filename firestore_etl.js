@@ -2,7 +2,7 @@
 
 const { Firestore } = require('@google-cloud/firestore');
 const { BigQuery } = require('@google-cloud/bigquery');
-const stream = require('stream'); // <--- NEW: Required for batch loading
+const stream = require('stream'); // REQUIRED for batch loading
 
 // --- Configuration ---
 // Environment variables MUST be set in your GitHub Actions workflow
@@ -54,8 +54,7 @@ async function getLastSyncTime() {
         // FIX: Correctly destructure [rows] from the bq.query method
         const [rows] = await bq.query({ query: query });
         
-        // rows[0].watermark will be a BigQuery TIMESTAMP object, which has a .value property 
-        // that is an ISO string. We convert it to a JS Date object.
+        // rows[0].watermark will be a BigQuery TIMESTAMP object
         const watermark = rows[0].watermark ? rows[0].watermark.value : FALLBACK_TIME.toISOString();
         
         console.log(`Starting ETL with watermark: ${watermark}`);
@@ -79,7 +78,7 @@ async function runEtl() {
         // 1. Determine Watermark
         const watermarkDate = await getLastSyncTime();
         
-        // 2. Extract Delta from Firestore (Requires fetching ALL and client-side filtering)
+        // 2. Extract Delta from Firestore
         const deltaSnapshot = await fs.collection('products').get(); 
 
         if (deltaSnapshot.empty) {
@@ -93,65 +92,13 @@ async function runEtl() {
             const unixTimestamp = data.updatedAt; 
             
             if (typeof unixTimestamp !== 'number') {
-                console.warn(`Skipping document ${doc.id}: 'updatedAt' is not a number. Found type: ${typeof unixTimestamp}`);
+                console.warn(`Skipping document ${doc.id}: 'updatedAt' is not a number.`);
                 return;
             }
             
-            // Convert Unix time to ISO string for comparison and loading
             const isoTimestamp = unixToIsoString(unixTimestamp);
             const docDate = new Date(isoTimestamp);
 
             // Client-side filtering check (Only keep records STRICTLY newer than the watermark)
             if (docDate > watermarkDate) {
-                // 3. Construct the row for the STAGING table
-                deltaData.push({
-                    document_id: doc.id,
-                    firestore_timestamp: isoTimestamp, 
-                    data_json: JSON.stringify(data) // The complete document payload
-                });
-            }
-        });
-
-        if (deltaData.length === 0) {
-            console.info('No new documents found since last sync. ETL complete.');
-            return;
-        }
-
-        console.log(`Extracted ${deltaData.length} new documents from Firestore.`);
-
-        // 4. Load to BigQuery Staging (WRITE_TRUNCATE) using a Batch Load Job
-        const stagingTable = bq.dataset(DATASET_ID).table(STAGING_TABLE);
-        
-        const jobConfig = {
-            writeDisposition: 'WRITE_TRUNCATE', // Overwrite the staging table
-            sourceFormat: 'NEWLINE_DELIMITED_JSON', // Standard format for inserting JSON data
-        };
-
-        // FIX: Using load() for a batch job instead of streaming insert()
-        // Convert the array of JSON objects into a readable stream of newline-delimited JSON string
-        const dataStream = stream.Readable.from(
-            deltaData.map(row => JSON.stringify(row) + '\n').join('')
-        );
-
-        // Start the load job
-        const [job] = await stagingTable.load(dataStream, jobConfig);
-
-        // Wait for the load job to complete (Load Jobs are asynchronous)
-        const [metadata] = await job.getMetadata();
-
-        if (metadata.status.errorResult) {
-            console.error('BigQuery Load Job failed:', metadata.status.errorResult);
-            throw new Error(`BigQuery Load Job failed: ${metadata.status.errorResult.message}`);
-        }
-
-        console.info(`Successfully loaded ${deltaData.length} rows to BigQuery staging table ${STAGING_TABLE} via batch job.`);
-        console.info('ETL Load phase finished successfully.');
-        
-    } catch (e) {
-        console.error(`Fatal error in pipeline: ${e.message}`, e);
-        // Ensure process exits with a non-zero code to fail the GitHub Action
-        process.exit(1); 
-    }
-}
-
-runEtl();
+                // 3. Construct the row
