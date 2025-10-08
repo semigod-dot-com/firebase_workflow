@@ -50,10 +50,8 @@ async function getLastSyncTime() {
     `;
 
     try {
-        // --- FIX APPLIED HERE ---
-        // The bq.query method returns [rows, apiResponse], so we destructure the rows directly.
+        // FIX: The bq.query method returns [rows, apiResponse], so we destructure the rows directly.
         const [rows] = await bq.query({ query: query });
-        // const rows = await job.getQueryResults(); // This line was removed
         
         // rows[0].watermark will be a BigQuery TIMESTAMP object, which has a .value property 
         // that is an ISO string. We convert it to a JS Date object.
@@ -81,8 +79,6 @@ async function runEtl() {
         const watermarkDate = await getLastSyncTime();
         
         // 2. Extract Delta from Firestore (Requires fetching ALL and client-side filtering)
-        // NOTE: For very large collections, consider BigQuery's change data capture (CDC) 
-        // or Firestore's aggregation queries for better performance.
         const deltaSnapshot = await fs.collection('products').get(); 
 
         if (deltaSnapshot.empty) {
@@ -93,7 +89,6 @@ async function runEtl() {
         const deltaData = [];
         deltaSnapshot.forEach(doc => {
             const data = doc.data();
-            // Ensure 'updatedAt' is accessed from the document data
             const unixTimestamp = data.updatedAt; 
             
             if (typeof unixTimestamp !== 'number') {
@@ -105,11 +100,9 @@ async function runEtl() {
             const isoTimestamp = unixToIsoString(unixTimestamp);
             const docDate = new Date(isoTimestamp);
 
-            // Client-side filtering check (Only keep records newer than the watermark)
-            // Use greater than (>) to avoid re-loading documents with the exact same time as the watermark
-            // (You have a separate scheduled job to handle duplicate appends anyway, but > is safer)
+            // Client-side filtering check (Only keep records STRICTLY newer than the watermark)
             if (docDate > watermarkDate) {
-                // 3. Construct the row for the STAGING table
+                // 3. Construct the row for the STAGING table
                 // This structure MUST match the staging table schema: document_id, firestore_timestamp, data_json
                 deltaData.push({
                     document_id: doc.id,
@@ -134,8 +127,8 @@ async function runEtl() {
             sourceFormat: 'NEWLINE_DELIMITED_JSON', // Standard format for inserting JSON data
         };
 
-        // Insert the data into the staging table
-        const [job] = await bq.table(stagingTableId).insert(deltaData, jobConfig);
+        // FIX: Correctly access the table using the dataset object
+        const [job] = await bq.dataset(DATASET_ID).table(STAGING_TABLE).insert(deltaData, jobConfig);
         
         if (job.insertErrors) {
             console.error('BigQuery insert failed:', job.insertErrors);
