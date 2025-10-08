@@ -101,4 +101,66 @@ async function runEtl() {
 
             // Client-side filtering check (Only keep records STRICTLY newer than the watermark)
             if (docDate > watermarkDate) {
-                // 3. Construct the row
+                // 3. Construct the row for the STAGING table
+                deltaData.push({
+                    document_id: doc.id,
+                    firestore_timestamp: isoTimestamp, 
+                    data_json: JSON.stringify(data) // The complete document payload
+                });
+            }
+        });
+
+        if (deltaData.length === 0) {
+            console.info('No new documents found since last sync. ETL complete.');
+            return;
+        }
+
+        console.log(`Extracted ${deltaData.length} new documents from Firestore.`);
+
+        // 4. Load to BigQuery Staging (WRITE_TRUNCATE) using a Batch Load Job
+        const stagingTable = bq.dataset(DATASET_ID).table(STAGING_TABLE);
+        
+        const jobConfig = {
+            writeDisposition: 'WRITE_TRUNCATE', // Overwrite the staging table
+            sourceFormat: 'NEWLINE_DELIMITED_JSON', // Standard format for inserting JSON data
+        };
+
+        // FIX: Using createWriteStream() to run a batch load job, bypassing Free Tier restrictions.
+        // Convert the array of JSON objects into a single string of NDJSON
+        const ndjsonString = deltaData.map(row => JSON.stringify(row)).join('\n');
+
+        // 1. Create a readable stream from the NDJSON string
+        const dataStream = stream.Readable.from(ndjsonString);
+
+        // 2. Start the BigQuery load job using createWriteStream()
+        const loadStream = stagingTable.createWriteStream(jobConfig);
+
+        // 3. Pipe the data stream into the load stream and wait for the 'job' event
+        const [job] = await new Promise((resolve, reject) => {
+            loadStream
+                .on('error', reject) // Handle stream errors
+                .on('job', resolve); // Resolve the promise with the job object when the job is submitted
+
+            // Pipe the data into the BigQuery stream
+            dataStream.pipe(loadStream);
+        });
+
+        // 4. Wait for the load job to complete (Load Jobs are asynchronous)
+        const [metadata] = await job.getMetadata();
+
+        if (metadata.status.errorResult) {
+            console.error('BigQuery Load Job failed:', metadata.status.errorResult);
+            throw new Error(`BigQuery Load Job failed: ${metadata.status.errorResult.message}`);
+        }
+
+        console.info(`Successfully loaded ${deltaData.length} rows to BigQuery staging table ${STAGING_TABLE} via batch job.`);
+        console.info('ETL Load phase finished successfully.');
+        
+    } catch (e) {
+        console.error(`Fatal error in pipeline: ${e.message}`, e);
+        // Ensure process exits with a non-zero code to fail the GitHub Action
+        process.exit(1); 
+    }
+}
+
+runEtl();
