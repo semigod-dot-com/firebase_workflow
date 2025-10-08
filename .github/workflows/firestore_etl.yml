@@ -24,17 +24,18 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
-          
-      # 2. Setup Python environment and install libraries
-      - name: Set up Python
-        uses: actions/setup-python@v5
+
+      # 2. Setup Node.js environment and install libraries
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.11'
-          
+          node-version: '20' # Use a recent LTS version
+
       - name: Install dependencies
-        run: pip install google-cloud-firestore google-cloud-bigquery
-        
-      # 3. Run the Python ETL script
+        # Assuming your package.json lists @google-cloud/firestore and @google-cloud/bigquery
+        run: npm install
+
+      # 3. Run the JavaScript ETL script using Node
       - name: Execute ETL Script
-        run: python firestore_etl.js
-      
+        # Use 'node' to execute the JavaScript file
+        run: node firestore_etl.js
