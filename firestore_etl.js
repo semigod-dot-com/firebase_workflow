@@ -2,7 +2,7 @@
 
 const { Firestore } = require('@google-cloud/firestore');
 const { BigQuery } = require('@google-cloud/bigquery');
-const stream = require('stream');
+const stream = require('stream'); // <--- NEW: Required for batch loading
 
 // --- Configuration ---
 // Environment variables MUST be set in your GitHub Actions workflow
@@ -51,7 +51,7 @@ async function getLastSyncTime() {
     `;
 
     try {
-        // FIX: The bq.query method returns [rows, apiResponse], so we destructure the rows directly.
+        // FIX: Correctly destructure [rows] from the bq.query method
         const [rows] = await bq.query({ query: query });
         
         // rows[0].watermark will be a BigQuery TIMESTAMP object, which has a .value property 
@@ -62,7 +62,7 @@ async function getLastSyncTime() {
         return new Date(watermark);
 
     } catch (e) {
-        // Handle table not found error on initial run (BigQuery API returns 404 for not found)
+        // Handle table not found error on initial run
         if (e.code === 404) {
              console.warn(`BigQuery table ${FINAL_TABLE} not found. Running full initial sync.`);
              return FALLBACK_TIME;
@@ -104,7 +104,6 @@ async function runEtl() {
             // Client-side filtering check (Only keep records STRICTLY newer than the watermark)
             if (docDate > watermarkDate) {
                 // 3. Construct the row for the STAGING table
-                // This structure MUST match the staging table schema: document_id, firestore_timestamp, data_json
                 deltaData.push({
                     document_id: doc.id,
                     firestore_timestamp: isoTimestamp, 
@@ -120,23 +119,32 @@ async function runEtl() {
 
         console.log(`Extracted ${deltaData.length} new documents from Firestore.`);
 
-        // 4. Load to BigQuery Staging (WRITE_TRUNCATE)
-        const stagingTableId = `${PROJECT_ID}.${DATASET_ID}.${STAGING_TABLE}`;
+        // 4. Load to BigQuery Staging (WRITE_TRUNCATE) using a Batch Load Job
+        const stagingTable = bq.dataset(DATASET_ID).table(STAGING_TABLE);
         
         const jobConfig = {
             writeDisposition: 'WRITE_TRUNCATE', // Overwrite the staging table
             sourceFormat: 'NEWLINE_DELIMITED_JSON', // Standard format for inserting JSON data
         };
 
-        // FIX: Correctly access the table using the dataset object
-        const [job] = await bq.dataset(DATASET_ID).table(STAGING_TABLE).insert(deltaData, jobConfig);
-        
-        if (job.insertErrors) {
-            console.error('BigQuery insert failed:', job.insertErrors);
-            throw new Error(`BigQuery insert failed with ${job.insertErrors.length} errors.`);
-        }
+        // FIX: Using load() for a batch job instead of streaming insert()
+        // Convert the array of JSON objects into a readable stream of newline-delimited JSON string
+        const dataStream = stream.Readable.from(
+            deltaData.map(row => JSON.stringify(row) + '\n').join('')
+        );
 
-        console.info(`Successfully loaded ${deltaData.length} rows to BigQuery staging table ${STAGING_TABLE}.`);
+        // Start the load job
+        const [job] = await stagingTable.load(dataStream, jobConfig);
+
+        // Wait for the load job to complete (Load Jobs are asynchronous)
+        const [metadata] = await job.getMetadata();
+
+        if (metadata.status.errorResult) {
+            console.error('BigQuery Load Job failed:', metadata.status.errorResult);
+            throw new Error(`BigQuery Load Job failed: ${metadata.status.errorResult.message}`);
+        }
+
+        console.info(`Successfully loaded ${deltaData.length} rows to BigQuery staging table ${STAGING_TABLE} via batch job.`);
         console.info('ETL Load phase finished successfully.');
         
     } catch (e) {
