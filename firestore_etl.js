@@ -1,46 +1,27 @@
-// firestore_etl.js
-
 const { Firestore } = require('@google-cloud/firestore');
 const { BigQuery } = require('@google-cloud/bigquery');
-const stream = require('stream'); // REQUIRED for batch loading
+const stream = require('stream');
 
-// --- Configuration ---
-// Environment variables MUST be set in your GitHub Actions workflow
 const PROJECT_ID = process.env.PROJECT_ID;
 const DATASET_ID = process.env.DATASET_ID;
 const STAGING_TABLE = process.env.STAGING_TABLE;
 const FINAL_TABLE = process.env.FINAL_TABLE;
 
-// Fallback time for the first run (1970-01-01T00:00:00.000Z)
 const FALLBACK_TIME = new Date(0); 
 
-// Initialize clients (assumes service account credentials are set by GitHub Actions)
 const bq = new BigQuery({ projectId: PROJECT_ID });
 const fs = new Firestore({ projectId: PROJECT_ID });
 
-// --- Helper Functions ---
-
-/**
- * Converts a Unix epoch timestamp (assumes milliseconds) to an ISO 8601 string.
- * @param {number} unixTime - The Unix timestamp integer.
- * @returns {string} ISO 8601 string (e.g., "2025-10-04T13:54:03.000Z").
- */
 function unixToIsoString(unixTime) {
     if (typeof unixTime !== 'number' || isNaN(unixTime)) {
         throw new Error("Invalid or missing 'updatedAt' value for conversion.");
     }
     
-    // Check for millisecond precision (typical if length > 10 digits)
     const milliseconds = (String(unixTime).length > 10) ? unixTime : unixTime * 1000;
     
-    // Date constructor handles milliseconds since epoch. toISOString() is required by BQ.
     return new Date(milliseconds).toISOString();
 }
 
-/**
- * Queries BigQuery for the latest firestore_timestamp in the FINAL table.
- * @returns {Promise<Date>} The latest synchronization time.
- */
 async function getLastSyncTime() {
     const tableRef = `\`${PROJECT_ID}.${DATASET_ID}.${FINAL_TABLE}\``;
     
@@ -67,14 +48,10 @@ async function getLastSyncTime() {
     }
 }
 
-// --- Main ETL Logic ---
-
 async function runEtl() {
     try {
-        // 1. Determine Watermark
         const watermarkDate = await getLastSyncTime();
         
-        // 2. Extract Delta from Firestore
         const deltaSnapshot = await fs.collection('products').get(); 
 
         if (deltaSnapshot.empty) {
@@ -95,13 +72,11 @@ async function runEtl() {
             const isoTimestamp = unixToIsoString(unixTimestamp);
             const docDate = new Date(isoTimestamp);
 
-            // Client-side filtering check (Only keep records STRICTLY newer than the watermark)
             if (docDate > watermarkDate) {
-                // 3. Construct the row for the STAGING table
                 deltaData.push({
                     document_id: doc.id,
                     firestore_timestamp: isoTimestamp, 
-                    data_json: JSON.stringify(data) // The complete document payload
+                    data_json: JSON.stringify(data)
                 });
             }
         });
@@ -113,48 +88,39 @@ async function runEtl() {
 
         console.log(`Extracted ${deltaData.length} new documents from Firestore.`);
 
-        // 4. Load to BigQuery Staging (WRITE_TRUNCATE) using a Batch Load Job
         const stagingTable = bq.dataset(DATASET_ID).table(STAGING_TABLE);
         
         const jobConfig = {
-            writeDisposition: 'WRITE_TRUNCATE', // Overwrite the staging table
-            sourceFormat: 'NEWLINE_DELIMITED_JSON', // Standard format for inserting JSON data
+            writeDisposition: 'WRITE_TRUNCATE',
+            sourceFormat: 'NEWLINE_DELIMITED_JSON',
         };
 
-        // Convert the array of JSON objects into a single string of NDJSON
-        const ndjsonString = deltaData.map(row => JSON.stringify(row)).join('\n');
+        const ndjsonString = deltaData.map(row => JSON.stringify(row)).join('\n');
 
-        // 1. Create a readable stream from the NDJSON string
-        const dataStream = stream.Readable.from(ndjsonString);
+        const dataStream = stream.Readable.from(ndjsonString);
 
-        // 2. Start the BigQuery load job using createWriteStream()
-        const loadStream = stagingTable.createWriteStream(jobConfig);
+        const loadStream = stagingTable.createWriteStream(jobConfig);
 
-        // 3. Pipe the data stream into the load stream and wait for the 'job' event
-        // FIX: Removed array destructuring ([job]) to fix the 'is not iterable' error.
-        const job = await new Promise((resolve, reject) => {
-            loadStream
-                .on('error', reject) // Handle stream errors
-                .on('job', resolve); // Resolve the promise with the job object when the job is submitted
+        const job = await new Promise((resolve, reject) => {
+            loadStream
+                .on('error', reject)
+                .on('job', resolve);
 
-            // Pipe the data into the BigQuery stream
-            dataStream.pipe(loadStream);
-        });
+            dataStream.pipe(loadStream);
+        });
 
-        // 4. Wait for the load job to complete (Load Jobs are asynchronous)
-        const [metadata] = await job.getMetadata();
+        const [metadata] = await job.getMetadata();
 
-        if (metadata.status.errorResult) {
-            console.error('BigQuery Load Job failed:', metadata.status.errorResult);
-            throw new Error(`BigQuery Load Job failed: ${metadata.status.errorResult.message}`);
-        }
+        if (metadata.status.errorResult) {
+            console.error('BigQuery Load Job failed:', metadata.status.errorResult);
+            throw new Error(`BigQuery Load Job failed: ${metadata.status.errorResult.message}`);
+        }
 
         console.info(`Successfully loaded ${deltaData.length} rows to BigQuery staging table ${STAGING_TABLE} via batch job.`);
         console.info('ETL Load phase finished successfully.');
         
     } catch (e) {
         console.error(`Fatal error in pipeline: ${e.message}`, e);
-        // Ensure process exits with a non-zero code to fail the GitHub Action
         process.exit(1); 
     }
 }
