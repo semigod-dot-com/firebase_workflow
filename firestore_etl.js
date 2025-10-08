@@ -2,6 +2,7 @@
 
 const { Firestore } = require('@google-cloud/firestore');
 const { BigQuery } = require('@google-cloud/bigquery');
+const stream = require('stream');
 
 // --- Configuration ---
 // Environment variables MUST be set in your GitHub Actions workflow
