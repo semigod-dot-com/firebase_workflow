@@ -2,7 +2,6 @@ const { Firestore } = require('@google-cloud/firestore');
 const { BigQuery } = require('@google-cloud/bigquery');
 const stream = require('stream');
 
-// --- FIX: Rely 100% on Environment Variables from GitHub Action ---
 const FS_PROJECT_ID = process.env.FS_PROJECT_ID; 
 const FS_COLLECTION_PATH = process.env.FS_COLLECTION_PATH; 
 
@@ -10,18 +9,12 @@ const BQ_PROJECT_ID = process.env.BQ_PROJECT_ID; 
 const BQ_DATASET_ID = process.env.BQ_DATASET_ID;
 const BQ_STAGING_TABLE = process.env.BQ_STAGING_TABLE;
 const BQ_FINAL_TABLE = process.env.BQ_FINAL_TABLE;
-// -----------------------------------------------------------------
 
 const TIMESTAMP_COLUMN_NAME = 'tx_time'; 
 const FIRESTORE_TIMESTAMP_FIELD = 'time'; 
 
 const FALLBACK_TIME = new Date(0);
 
-// Debug logging to verify variables are present
-console.log(`Debug: BQ_PROJECT_ID is set to: [${BQ_PROJECT_ID}]`);
-console.log(`Debug: FS_PROJECT_ID is set to: [${FS_PROJECT_ID}]`);
-
-// Initializing clients
 const bq = new BigQuery({ projectId: BQ_PROJECT_ID });
 const fs = new Firestore({ projectId: FS_PROJECT_ID });
 
@@ -36,9 +29,6 @@ function unixToIsoString(unixTime) {
 }
 
 async function getLastSyncTime() {
-    // NOTE: For the first test run, you might want to skip this function 
-    // and manually set watermarkDate = FALLBACK_TIME to ensure you load all 
-    // your initial dummy documents.
     const tableRef = `\`${BQ_PROJECT_ID}.${BQ_DATASET_ID}.${BQ_FINAL_TABLE}\``;
     
     const query = `
@@ -68,7 +58,6 @@ async function runEtl() {
     try {
         const watermarkDate = await getLastSyncTime();
         
-        // THE KEY FIX: collectionGroup() with the server-side filter
         const deltaSnapshot = await fs.collectionGroup(FS_COLLECTION_PATH)
             .where(FIRESTORE_TIMESTAMP_FIELD, '>', watermarkDate.getTime() / 1000)
             .get(); 
@@ -110,6 +99,13 @@ async function runEtl() {
         const jobConfig = {
             writeDisposition: 'WRITE_TRUNCATE',
             sourceFormat: 'NEWLINE_DELIMITED_JSON',
+            schema: {
+                fields: [
+                    { name: 'document_id', type: 'STRING', mode: 'REQUIRED' },
+                    { name: 'tx_time', type: 'TIMESTAMP', mode: 'REQUIRED' },
+                    { name: 'data_json', type: 'STRING', mode: 'REQUIRED' }
+                ]
+            }
         };
 
         const ndjsonString = deltaData.map(row => JSON.stringify(row)).join('\n');
