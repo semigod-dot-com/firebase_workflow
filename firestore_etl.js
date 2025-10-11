@@ -59,7 +59,7 @@ async function runEtl() {
         const watermarkDate = await getLastSyncTime();
         
         const deltaSnapshot = await fs.collectionGroup(FS_COLLECTION_PATH)
-            .where(FIRESTORE_TIMESTAMP_FIELD, '>', watermarkDate.getTime() / 1000)
+            .where(FIRESTORE_TIMESTAMP_FIELD, '>=', watermarkDate.getTime() / 1000)
             .get(); 
 
         if (deltaSnapshot.empty) {
