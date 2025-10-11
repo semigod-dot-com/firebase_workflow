@@ -5,15 +5,23 @@ on:
     # Schedule to run every hour, for example, at 5 minutes past the hour (UTC)
     - cron: '5 * * * *' 
   workflow_dispatch:
+    # Allows manual running from the GitHub Actions UI
 
 jobs:
   run_etl:
     runs-on: ubuntu-latest
+    
+    # 🚨 CRITICAL FIX: Map generic names to the names the JS script expects
     env:
-      PROJECT_ID: fir-practice-f5ec3
-      DATASET_ID: practice
-      STAGING_TABLE: products_staging
-      FINAL_TABLE: products_final
+      # Firestore Connection Details
+      FS_PROJECT_ID: fir-practice-f5ec3
+      FS_COLLECTION_PATH: transaction # Mandatory for your script's fs.collectionGroup() call
+
+      # BigQuery Connection Details
+      BQ_PROJECT_ID: fir-practice-f5ec3
+      BQ_DATASET_ID: practice
+      BQ_STAGING_TABLE: products_staging
+      BQ_FINAL_TABLE: products_final
 
     steps:
       - name: Checkout code
@@ -29,7 +37,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # Use a recent LTS version
+          node-version: '20'
 
       - name: Install dependencies
         # Assuming your package.json lists @google-cloud/firestore and @google-cloud/bigquery
@@ -37,5 +45,4 @@ jobs:
 
       # 3. Run the JavaScript ETL script using Node
       - name: Execute ETL Script
-        # Use 'node' to execute the JavaScript file
         run: node firestore_etl.js
