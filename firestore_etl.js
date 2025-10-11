@@ -2,19 +2,26 @@ const { Firestore } = require('@google-cloud/firestore');
 const { BigQuery } = require('@google-cloud/bigquery');
 const stream = require('stream');
 
-const PROJECT_ID = process.env.PROJECT_ID;
-const DATASET_ID = process.env.DATASET_ID;
-const STAGING_TABLE = process.env.STAGING_TABLE;
-const FINAL_TABLE = process.env.FINAL_TABLE;
+// Use your personal project IDs and table names here:
+const FS_PROJECT_ID = 'YOUR_PERSONAL_FIRESTORE_PROJECT_ID'; 
+const FS_COLLECTION_PATH = 'transaction'; // Matches your subcollection name
 
-const FALLBACK_TIME = new Date(0); 
+const BQ_PROJECT_ID = 'YOUR_PERSONAL_BIGQUERY_PROJECT_ID'; 
+const BQ_DATASET_ID = 'test_dataset';
+const BQ_STAGING_TABLE = 'test_staging';
+const BQ_FINAL_TABLE = 'test_final';
 
-const bq = new BigQuery({ projectId: PROJECT_ID });
-const fs = new Firestore({ projectId: PROJECT_ID });
+const TIMESTAMP_COLUMN_NAME = 'tx_time'; 
+const FIRESTORE_TIMESTAMP_FIELD = 'time'; 
+
+const FALLBACK_TIME = new Date(0);
+
+const bq = new BigQuery({ projectId: BQ_PROJECT_ID });
+const fs = new Firestore({ projectId: FS_PROJECT_ID });
 
 function unixToIsoString(unixTime) {
     if (typeof unixTime !== 'number' || isNaN(unixTime)) {
-        throw new Error("Invalid or missing 'updatedAt' value for conversion.");
+        throw new Error(`Invalid or missing '${FIRESTORE_TIMESTAMP_FIELD}' value for conversion.`);
     }
     
     const milliseconds = (String(unixTime).length > 10) ? unixTime : unixTime * 1000;
@@ -23,10 +30,13 @@ function unixToIsoString(unixTime) {
 }
 
 async function getLastSyncTime() {
-    const tableRef = `\`${PROJECT_ID}.${DATASET_ID}.${FINAL_TABLE}\``;
+    // NOTE: For the first test run, you might want to skip this function 
+    // and manually set watermarkDate = FALLBACK_TIME to ensure you load all 
+    // your initial dummy documents.
+    const tableRef = `\`${BQ_PROJECT_ID}.${BQ_DATASET_ID}.${BQ_FINAL_TABLE}\``;
     
     const query = `
-        SELECT COALESCE(MAX(firestore_timestamp), CAST('${FALLBACK_TIME.toISOString()}' AS TIMESTAMP)) AS watermark
+        SELECT COALESCE(MAX(${TIMESTAMP_COLUMN_NAME}), CAST('${FALLBACK_TIME.toISOString()}' AS TIMESTAMP)) AS watermark
         FROM ${tableRef}
     `;
 
@@ -40,8 +50,8 @@ async function getLastSyncTime() {
 
     } catch (e) {
         if (e.code === 404) {
-             console.warn(`BigQuery table ${FINAL_TABLE} not found. Running full initial sync.`);
-             return FALLBACK_TIME;
+             console.warn(`BigQuery table ${BQ_FINAL_TABLE} not found. Running full initial sync (or table needs to be created).`);
+             return FALLBACK_TIME; 
         }
         console.error(`Critical error fetching watermark: ${e.message}`);
         throw e;
@@ -52,33 +62,34 @@ async function runEtl() {
     try {
         const watermarkDate = await getLastSyncTime();
         
-        const deltaSnapshot = await fs.collection('products').get(); 
+        // THE KEY FIX: collectionGroup() with the server-side filter
+        const deltaSnapshot = await fs.collectionGroup(FS_COLLECTION_PATH)
+            .where(FIRESTORE_TIMESTAMP_FIELD, '>', watermarkDate.getTime() / 1000)
+            .get(); 
 
         if (deltaSnapshot.empty) {
-            console.info('No data found in Firestore. Exiting ETL.');
+            console.info('No data found in Firestore since watermark. Exiting ETL.');
             return;
         }
 
         const deltaData = [];
         deltaSnapshot.forEach(doc => {
             const data = doc.data();
-            const unixTimestamp = data.updatedAt; 
+            
+            const unixTimestamp = data[FIRESTORE_TIMESTAMP_FIELD]; 
             
             if (typeof unixTimestamp !== 'number') {
-                console.warn(`Skipping document ${doc.id}: 'updatedAt' is not a number.`);
+                console.warn(`Skipping document ${doc.id}: '${FIRESTORE_TIMESTAMP_FIELD}' is not a number.`);
                 return;
             }
             
             const isoTimestamp = unixToIsoString(unixTimestamp);
-            const docDate = new Date(isoTimestamp);
-
-            if (docDate > watermarkDate) {
-                deltaData.push({
-                    document_id: doc.id,
-                    firestore_timestamp: isoTimestamp, 
-                    data_json: JSON.stringify(data)
-                });
-            }
+            
+            deltaData.push({
+                document_id: doc.id,
+                [TIMESTAMP_COLUMN_NAME]: isoTimestamp, 
+                data_json: JSON.stringify(data)
+            });
         });
 
         if (deltaData.length === 0) {
@@ -88,7 +99,7 @@ async function runEtl() {
 
         console.log(`Extracted ${deltaData.length} new documents from Firestore.`);
 
-        const stagingTable = bq.dataset(DATASET_ID).table(STAGING_TABLE);
+        const stagingTable = bq.dataset(BQ_DATASET_ID).table(BQ_STAGING_TABLE);
         
         const jobConfig = {
             writeDisposition: 'WRITE_TRUNCATE',
@@ -116,7 +127,7 @@ async function runEtl() {
             throw new Error(`BigQuery Load Job failed: ${metadata.status.errorResult.message}`);
         }
 
-        console.info(`Successfully loaded ${deltaData.length} rows to BigQuery staging table ${STAGING_TABLE} via batch job.`);
+        console.info(`Successfully loaded ${deltaData.length} rows to BigQuery staging table ${BQ_STAGING_TABLE}.`);
         console.info('ETL Load phase finished successfully.');
         
     } catch (e) {
